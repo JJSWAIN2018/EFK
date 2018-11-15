@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: appache2 
+  labels:
+    app: appache2
+#  namespace: logging
+spec:
+#  nodeSelector:
+#    kubernetes.io/hostname: kworker-1 
+  containers:
+  - name: appache2
+    image: httpd 
+

@@ -1,0 +1,241 @@
+#---
+#apiVersion: v1
+#kind: ServiceAccount
+#metadata:
+#  name: fluent-bit
+
+#---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  labels:
+    k8s-app: fluent-bit
+data:
+  # Configuration files: server, input, filters and output
+  # ======================================================
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         1
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+    @INCLUDE input-kubernetes.conf
+    @INCLUDE filter-kubernetes.conf
+    @INCLUDE output-elasticsearch.conf
+  input-kubernetes.conf: |
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*.log
+        Parser            docker
+        DB                /var/log/flb_kube.db
+        Mem_Buf_Limit     5MB
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+  filter-kubernetes.conf: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc.cluster.local:443
+        Merge_Log           On
+        K8S-Logging.Parser  On
+  output-elasticsearch.conf: |
+    [OUTPUT]
+        Name            es
+        Match           *
+        Host            ${FLUENT_ELASTICSEARCH_HOST}
+        Port            ${FLUENT_ELASTICSEARCH_PORT}
+        Logstash_Format On
+        Retry_Limit     False
+  parsers.conf: |
+    [PARSER]
+        Name   apache
+        Format regex
+        Regex  ^(?<host>[^ ]*) [^ ]* (?<user>[^ ]*) \[(?<time>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^\"]*?)(?: +\S*)?)?" (?<code>[^ ]*) (?<size>[^ ]*)(?: "(?<referer>[^\"]*)" "(?<agent>[^\"]*)")?$
+        Time_Key time
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+    [PARSER]
+        Name   apache2
+        Format regex
+        Regex  ^(?<host>[^ ]*) [^ ]* (?<user>[^ ]*) \[(?<time>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^ ]*) +\S*)?" (?<code>[^ ]*) (?<size>[^ ]*)(?: "(?<referer>[^\"]*)" "(?<agent>[^\"]*)")?$
+        Time_Key time
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+    [PARSER]
+        Name   apache_error
+        Format regex
+        Regex  ^\[[^ ]* (?<time>[^\]]*)\] \[(?<level>[^\]]*)\](?: \[pid (?<pid>[^\]]*)\])?( \[client (?<client>[^\]]*)\])? (?<message>.*)$
+    [PARSER]
+        Name   nginx
+        Format regex
+        Regex ^(?<remote>[^ ]*) (?<host>[^ ]*) (?<user>[^ ]*) \[(?<time>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^\"]*) +\S*)?" (?<code>[^ ]*) (?<size>[^ ]*) "(?<referer>[^\"]*)" "(?<agent>[^\"]*)" "(?<unknown>[^ ]*)"$ 
+        Time_Key time
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+    [PARSER]
+        Name   json
+        Format json
+        Time_Key time
+        Time_Format %d/%b/%Y:%H:%M:%S %z
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Keep   On
+        # Command      |  Decoder | Field | Optional Action
+        # =============|==================|=================
+        Decode_Field_As   escaped    log
+    [PARSER]
+        Name        syslog
+        Format      regex
+        Regex       ^\<(?<pri>[0-9]+)\>(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[a-zA-Z0-9_\/\.\-]*)(?:\[(?<pid>[0-9]+)\])?(?:[^\:]*\:)? *(?<message>.*)$
+        Time_Key   time
+        Time_Format %b %d %H:%M:%S
+
+#---
+# fluentd-config-map.yml
+#apiVersion: v1
+#kind: ConfigMap
+#metadata:
+#  name: fluentd-config
+#data:
+#  fluent.conf: |
+#    <match fluent.**>
+#        # this tells fluentd to not output its log on stdout
+#        @type null
+#    </match>
+#
+#    # here we read the logs from Docker's containers and parse them
+#    <source>
+#      @type tail
+#      path /var/log/containers/*.log
+#      pos_file /var/log/fluentd-containers.log.pos
+#      tag kubernetes.*
+#      read_from_head true
+#      <parse>
+#        @type json
+#        time_format %Y-%m-%dT%H:%M:%S.%NZ
+#      </parse>      
+#    </source>
+#
+#    # we use kubernetes metadata plugin to add metadatas to the log
+#    <filter kubernetes.**>
+#        @type kubernetes_metadata
+#    </filter>
+#   # this add the namespace name at the begining of the tag
+#<match kubernetes.**>
+#    @type rewrite_tag_filter
+#    <rule>
+#        key $['kubernetes']['namespace_name']
+#        pattern ^(.+)$
+#        tag $1.${tag}
+#    </rule>
+#</match>
+#
+#    # we send the logs to Elasticsearch
+#    <match kubernetes.**>
+#        @type elasticsearch
+#        include_tag_key true
+#        host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+#        port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+#        scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'http'}"
+#        ssl_verify "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERIFY'] || 'true'}"
+#        user "#{ENV['FLUENT_ELASTICSEARCH_USER']}" # remove these lines if not needed
+#        password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD']}" # remove these lines if not needed
+#        reload_connections true
+#        logstash_prefix logstash
+#        logstash_format true
+#        <buffer>
+#            flush_thread_count 8
+#            flush_interval 5s
+#            chunk_limit_size 2M
+#            queue_limit_length 32
+#            retry_max_interval 30
+#            retry_forever true
+#        </buffer>
+#    </match>
+#    # match the dev logs
+#<match dev.kubernetes.**>
+#    @type elasticsearch
+#    include_tag_key true
+#    host "#{ENV['FLUENT_ELASTICSEARCH_HOST_DEV']}"
+#    port "#{ENV['FLUENT_ELASTICSEARCH_PORT_DEV']}"
+#    scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME_DEV'] || 'http'}"
+#    ...
+#</match>
+## match the production logs
+#<match production.kubernetes.**>
+#    @type elasticsearch
+#    include_tag_key true
+#    host "#{ENV['FLUENT_ELASTICSEARCH_HOST_PROD']}"
+#    port "#{ENV['FLUENT_ELASTICSEARCH_PORT_PROD']}"
+#    scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME_PROD'] || 'http'}"
+#    ...
+#</match>
+#<filter kubernetes.**>
+#    @type grep
+#    <regexp>
+#        key $.kubernetes.labels.fluentd
+#        pattern true
+#    </regexp>
+#</filter>
+---
+apiVersion: extensions/v1beta1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  labels:
+    k8s-app: fluent-bit-logging
+    version: v1
+    kubernetes.io/cluster-service: "true"
+spec:
+  template:
+    metadata:
+      labels:
+        k8s-app: fluent-bit-logging
+        version: v1
+        kubernetes.io/cluster-service: "true"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "2020"
+        prometheus.io/path: /api/v1/metrics/prometheus
+    spec:
+      containers:
+      - name: fluent-bit
+        image: fluent/fluent-bit:0.14.3
+        imagePullPolicy: Always
+        ports:
+          - containerPort: 2020
+        env:
+        - name: FLUENT_ELASTICSEARCH_HOST
+          value: "es"
+        - name: FLUENT_ELASTICSEARCH_PORT
+          value: "9200"
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: fluent-bit-config
+          mountPath: /fluent-bit/etc/
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: fluent-bit-config
+        configMap:
+          name: fluent-bit-config
+      serviceAccountName: fluentd
+      serviceAccount: fluentd
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
